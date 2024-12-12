@@ -16,7 +16,7 @@ LIST_NAME = os.getenv('LIST_NAME', "followed by followers")
 client = Client()
 client.login(USERNAME, PASSWORD)
 
-# 2. 自分のフォロワー、フォロー中、リストのユーザーを取得
+# 2. 自分のフォロワー、フォロー中のユーザーを取得
 def get_followers_and_following(client):
     # 自分のDIDを取得
     did = client.me.did
@@ -43,6 +43,24 @@ def get_followers_and_following(client):
     
     return followers, following
 
+def retry_with_backoff(func, max_retries=16, initial_delay=1):
+    """
+    Exponential backoffを使用してAPI呼び出しをリトライする
+    """
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except RequestException as e:
+            if "RateLimitExceeded" not in str(e) or attempt == max_retries - 1:
+                raise e
+            
+            # 遅延時間を計算 (2^attempt * initial_delay + random jitter)
+            delay = (2 ** attempt * initial_delay + 
+                    random.uniform(0, 0.1 * (2 ** attempt)))
+            next_retry_time = time.time() + delay
+            print(f"Rate limit exceeded. Retrying in {delay:.1f} seconds at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_retry_time))}...", end="")
+            time.sleep(delay)
+
 def get_list_users(client, list_name):
     # リストが存在するか確認
     lists = client.app.bsky.graph.get_lists({'actor': client.me.did}).lists
@@ -65,34 +83,15 @@ def get_list_users(client, list_name):
         cursor = response.cursor
     return list_id, list_users
 
-def retry_with_backoff(func, max_retries=16, initial_delay=1):
-    """
-    Exponential backoffを使用してAPI呼び出しをリトライする
-    """
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except RequestException as e:
-            if "RateLimitExceeded" not in str(e) or attempt == max_retries - 1:
-                raise e
-            
-            # 遅延時間を計算 (2^attempt * initial_delay + random jitter)
-            delay = (2 ** attempt * initial_delay + 
-                    random.uniform(0, 0.1 * (2 ** attempt)))
-            next_retry_time = time.time() + delay
-            print(f"Rate limit exceeded. Retrying in {delay:.1f} seconds at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_retry_time))}...", end="")
-            time.sleep(delay)
-
-
 # 3. リストを更新
-def calculate_list_changes(client, followers, following, list_users):
+def calculate_list_changes(client, followers, following, list_name):
     following_set = {user.did for user in following}
-    list_users_set = {user.subject.did for user in list_users}
     followers_set = {user.did for user in followers}
     
     # フォロワーのフォローを取得
     followers_following = set()
     with tqdm(total=len(followers_set), desc="Fetching follows", unit="follower") as pbar:
+        global_start_time = time.time()
         for follower_did in followers_set:
             follower_handle = next((user.handle for user in followers if user.did == follower_did), "Unknown")
             # 最終投稿が30日以上前の場合はスキップ
@@ -104,20 +103,22 @@ def calculate_list_changes(client, followers, following, list_users):
                     latest_post_time_str = latest_post.post.record.created_at
                     latest_post_time = time.mktime(time.strptime(latest_post_time_str.split('.')[0], "%Y-%m-%dT%H:%M:%S"))
                 else:
-                    pbar.set_postfix_str(f"No posts for actor {follower_handle}. Skipping...")
+                    pbar.set_postfix_str(f"Skip {follower_handle} for no post.")
                     pbar.update(1)
                     continue
             except Exception as e:
-                pbar.set_postfix_str(f"Error retrieving posts for actor {follower_handle}: {e}. Skipping...")
+                pbar.set_postfix_str(f"Skip {follower_handle} for error")
+                print(f"error {e}")
                 pbar.update(1)
                 continue
             if (time.time() - latest_post_time) > 30 * 24 * 60 * 60:
-                pbar.set_postfix_str(f"Last post over 30 days ago for actor {follower_handle}. Skipping...")
+                pbar.set_postfix_str(f"Skip {follower_handle} for inactive")
                 pbar.update(1)
                 continue
 
             start_time = time.time()
             cursor = None
+            total_fetched = 0
             while True:
                 response = retry_with_backoff(
                     lambda: client.app.bsky.graph.get_follows({'actor': follower_did, 'cursor': cursor})
@@ -125,16 +126,26 @@ def calculate_list_changes(client, followers, following, list_users):
                 follower_following = response.follows
                 current_follower_following = set(user.did for user in follower_following)
                 followers_following.update(current_follower_following)
-                if not response.cursor:
-                    break                
+                total_fetched += len(follower_following)
+                if not response.cursor or total_fetched >= 300:
+                    break
                 cursor = response.cursor
-            
-            elapsed_time = time.time() - start_time
-            pbar.set_postfix_str(f"Handle: {follower_handle}, ETA: {pbar.format_interval(elapsed_time * (len(followers_set) - pbar.n))}")
+                elapsed_time = time.time() - start_time
+                if elapsed_time > 5:
+                    pbar.set_postfix_str(f"Heavy fetching in handle: {follower_handle}")
+            elapsed_time = time.time() - global_start_time
+            remaining_count = len(followers_set) - pbar.n
+            eta = elapsed_time / (pbar.n + 1) * remaining_count
+            pbar.set_postfix_str(f"Handle: {follower_handle}, ETA: {pbar.format_interval(eta)}")
             pbar.update(1)
+    
+    # リストのユーザーを取得
+    list_id, list_users = get_list_users(client, list_name)
+    list_users_set = {user.subject.did for user in list_users}
     
     followers_following_following_dict = {}
     with tqdm(total=len(followers_following), desc="Processing followers_following", unit="follower") as pbar:
+        global_start_time = time.time()
         for follower_did in followers_following:
             start_time = time.time()
             cursor = None
@@ -145,16 +156,18 @@ def calculate_list_changes(client, followers, following, list_users):
                 )
                 follower_following = response.follows
                 follower_following_set.update(user.did for user in follower_following)
-                if not response.cursor:
+                if not response.cursor or len(follower_following_set) > 100:
                     break
                 cursor = response.cursor
-            followers_following_following_dict[follower_did] = follower_following_set
+                elapsed_time = time.time() - start_time
+                if elapsed_time > 5:
+                    pbar.set_postfix_str(f"Heavy feting {follower_did}")
+            followers_following_following_dict[follower_did] = follower_following_set            
             
-            # フォロワーのハンドルを取得
-            follower_handle = next((user.handle for user in followers if user.did == follower_did), "Unknown")
-            
-            elapsed_time = time.time() - start_time
-            pbar.set_postfix_str(f"Handle: {follower_handle}, ETA: {pbar.format_interval(elapsed_time * (len(followers_following) - pbar.n))}")
+            elapsed_time = time.time() - global_start_time
+            remaining_count = len(followers_following) - pbar.n
+            eta = elapsed_time / (pbar.n + 1) * remaining_count
+            pbar.set_postfix_str(f"ETA: {pbar.format_interval(eta)}")
             pbar.update(1)
     
     # 自分のfollowingと共通のfollowingを持つユーザーを抽出
@@ -176,7 +189,7 @@ def calculate_list_changes(client, followers, following, list_users):
     # リストから削除すべきユーザー
     to_remove = list_users_set - non_followed
     
-    return to_add, to_remove
+    return list_id, to_add, to_remove
 
 def update_list(client, list_id, to_add, to_remove):    
     # リストのアイテムを全件取得
@@ -238,10 +251,8 @@ def update_list(client, list_id, to_add, to_remove):
 # 実行
 followers, following = get_followers_and_following(client)
 print(f"Followers: {len(followers)}, Following: {len(following)}")
-list_id, list_users = get_list_users(client, LIST_NAME)
-print(f"List users: {len(list_users)}")
 
-to_add, to_remove = calculate_list_changes(client, followers, following, list_users)
+list_id, to_add, to_remove = calculate_list_changes(client, followers, following, LIST_NAME)
 print(f"Adding {len(to_add)} users, removing {len(to_remove)} users...")
 
 update_list(client, list_id, to_add, to_remove)
