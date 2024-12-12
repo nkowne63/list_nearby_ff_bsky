@@ -86,34 +86,42 @@ def retry_with_backoff(func, max_retries=16, initial_delay=1):
 
 # 3. リストを更新
 def calculate_list_changes(client, followers, following, list_users):
-    # フォロー中のユーザーのDIDセット
     following_set = {user.did for user in following}
-    
-    # 現在のリストに含まれているDIDセット
     list_users_set = {user.subject.did for user in list_users}
+    followers_set = {user.did for user in followers}
     
     # フォロワーのフォローを取得
     followers_following = set()
-    with tqdm(total=len(followers), desc="Fetching follows", unit="follower") as pbar:
-        for follower in followers:
+    with tqdm(total=len(followers_set), desc="Fetching follows", unit="follower") as pbar:
+        for follower_did in followers_set:
+            # 最終投稿が30日以上前の場合はスキップ
+            try:
+                last_post_time = client.app.bsky.actor.get_profile({'actor': follower_did}).last_post_time
+            except AttributeError:
+                print(f"Error: 'last_post_time' attribute not found for actor {follower_did}. Skipping...")
+                continue
+
+            if (time.time() - last_post_time) > 30 * 24 * 60 * 60:
+                continue
+            
             start_time = time.time()
             cursor = None
             while True:
                 response = retry_with_backoff(
-                    lambda: client.app.bsky.graph.get_follows({'actor': follower.did, 'cursor': cursor})
+                    lambda: client.app.bsky.graph.get_follows({'actor': follower_did, 'cursor': cursor})
                 )
                 follower_following = response.follows
-                followers_following.update(user.did for user in follower_following)
+                current_follower_following = set(user.did for user in follower_following)
+                followers_following.update(current_follower_following)
                 if not response.cursor:
-                    break
+                    break                
                 cursor = response.cursor
+            
             elapsed_time = time.time() - start_time
-            pbar.set_postfix_str(f"Handle: {follower.handle}, ETA: {pbar.format_interval(elapsed_time * (len(followers) - pbar.n))}")
+            follower_handle = next((user.handle for user in followers if user.did == follower_did), "Unknown")
+            pbar.set_postfix_str(f"Handle: {follower_handle}, ETA: {pbar.format_interval(elapsed_time * (len(followers_set) - pbar.n))}")
             pbar.update(1)
     
-    # この時点で自分がフォローしている人は除外しておく
-    followers_following = followers_following - following_set
-
     followers_following_following_dict = {}
     with tqdm(total=len(followers_following), desc="Processing followers_following", unit="follower") as pbar:
         for follower_did in followers_following:
