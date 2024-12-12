@@ -4,6 +4,7 @@ import os
 from atproto import Client
 from atproto_client.exceptions import RequestException
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 load_dotenv()
 
@@ -79,7 +80,7 @@ def retry_with_backoff(func, max_retries=16, initial_delay=1):
             delay = (2 ** attempt * initial_delay + 
                     random.uniform(0, 0.1 * (2 ** attempt)))
             next_retry_time = time.time() + delay
-            print(f"Rate limit exceeded. Retrying in {delay:.1f} seconds at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_retry_time))}...")
+            print(f"Rate limit exceeded. Retrying in {delay:.1f} seconds at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_retry_time))}...", end="")
             time.sleep(delay)
 
 
@@ -93,15 +94,53 @@ def calculate_list_changes(client, followers, following, list_users):
     
     # フォロワーのフォローを取得
     followers_following = set()
-    for index, follower in enumerate(followers, start=1):
-        # ここは50件のみだが、それでも多すぎるくらいなので問題ない
-        follower_following = retry_with_backoff(
-            lambda: client.app.bsky.graph.get_follows({'actor': follower.did})
-        ).follows
-        followers_following.update(user.did for user in follower_following)
-        
-        if index % 10 == 0:
-            print(f"{index}/{len(followers)} follows fetch completed")
+    with tqdm(total=len(followers), desc="Fetching follows", unit="follower") as pbar:
+        for follower in followers:
+            start_time = time.time()
+            cursor = None
+            while True:
+                response = retry_with_backoff(
+                    lambda: client.app.bsky.graph.get_follows({'actor': follower.did, 'cursor': cursor})
+                )
+                follower_following = response.follows
+                followers_following.update(user.did for user in follower_following)
+                if not response.cursor:
+                    break
+                cursor = response.cursor
+            elapsed_time = time.time() - start_time
+            pbar.set_postfix_str(f"ETA: {pbar.format_interval(elapsed_time * (len(followers) - pbar.n))}")
+            pbar.update(1)
+
+    followers_following_following_dict = {}
+    with tqdm(total=len(followers_following), desc="Processing followers_following", unit="follower") as pbar:
+        for index, follower_did in enumerate(followers_following, start=1):
+            start_time = time.time()
+            cursor = None
+            follower_following_set = set()
+            while True:
+                response = retry_with_backoff(
+                    lambda: client.app.bsky.graph.get_follows({'actor': follower_did, 'cursor': cursor})
+                )
+                follower_following = response.follows
+                follower_following_set.update(user.did for user in follower_following)
+                if not response.cursor:
+                    break
+                cursor = response.cursor
+            followers_following_following_dict[follower_did] = follower_following_set
+            
+            elapsed_time = time.time() - start_time
+            pbar.set_postfix_str(f"ETA: {pbar.format_interval(elapsed_time * (len(followers_following) - pbar.n))}")
+            pbar.update(1)
+    
+    # 自分のfollowingと共通のfollowingを持つユーザーを抽出
+    common_following_users = set()
+    for follower_did, follower_following_set in followers_following_following_dict.items():
+        # 自分のfollowingと共通のfollowingがあるか確認
+        if following_set & follower_following_set:
+            common_following_users.add(follower_did)
+    
+    # followers_followingを共通のfollowingを持つユーザーに限定
+    followers_following = common_following_users
     
     # フォロワーのフォローのうち、自分がフォローしていないユーザー
     non_followed = followers_following - following_set
@@ -129,39 +168,46 @@ def update_list(client, list_id, to_add, to_remove):
     print("list items fetched")
 
     # リストから削除
-    for remove_count, did in enumerate(to_remove, start=1):
-        # 該当するユーザーのアイテムを探す
-        item = next((item for item in items if item.subject.did == did), None)
-        if item:
-            uri_parts = item.uri.split('/')
-            rkey = uri_parts[-1]
+    with tqdm(total=len(to_remove), desc="Removing users", unit="user") as pbar:
+        for remove_count, did in enumerate(to_remove, start=1):
+            # 該当するユーザーのアイテムを探す
+            item = next((item for item in items if item.subject.did == did), None)
+            if item:
+                uri_parts = item.uri.split('/')
+                rkey = uri_parts[-1]
+                profile = retry_with_backoff(
+                    lambda: client.app.bsky.actor.get_profile({'actor': did})
+                )
+                retry_with_backoff(lambda: client.app.bsky.graph.listitem.delete(
+                    repo=client.me.did,
+                    rkey=rkey
+                ))
+                eta = pbar.format_interval(pbar.format_dict['elapsed'] * (len(to_remove) - remove_count))
+                pbar.set_postfix_str(f"ETA: {eta}, Removed: {profile.handle}")
+                pbar.update(1)
+
+    # リストに追加
+    with tqdm(total=len(to_add), desc="Adding users", unit="user") as pbar:
+        for i, did in enumerate(to_add, 1):
+            record = {
+                "subject": did,
+                "list": list_id,
+                "createdAt": client.get_current_time_iso()
+            }
+            
+            # createとget_profileの呼び出しをリトライ可能に
+            retry_with_backoff(lambda: client.app.bsky.graph.listitem.create(
+                repo=client.me.did,
+                record=record
+            ))
+            
             profile = retry_with_backoff(
                 lambda: client.app.bsky.actor.get_profile({'actor': did})
             )
-            retry_with_backoff(lambda: client.app.bsky.graph.listitem.delete(
-                repo=client.me.did,
-                rkey=rkey
-            ))
-            print(f"Removed from list {remove_count}/{len(to_remove)}: {profile.handle}")
-
-    # リストに追加
-    for i, did in enumerate(to_add, 1):
-        record = {
-            "subject": did,
-            "list": list_id,
-            "createdAt": client.get_current_time_iso()
-        }
-        
-        # createとget_profileの呼び出しをリトライ可能に
-        retry_with_backoff(lambda: client.app.bsky.graph.listitem.create(
-            repo=client.me.did,
-            record=record
-        ))
-        
-        profile = retry_with_backoff(
-            lambda: client.app.bsky.actor.get_profile({'actor': did})
-        )
-        print(f"Added to list {i}/{len(to_add)}: {profile.handle}")
+            
+            eta = pbar.format_interval(pbar.format_dict['elapsed'] * (len(to_add) - i))
+            pbar.set_postfix_str(f"ETA: {eta}, Added: {profile.handle}")
+            pbar.update(1)
 
 
 # 実行
