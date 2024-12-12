@@ -95,15 +95,26 @@ def calculate_list_changes(client, followers, following, list_users):
     with tqdm(total=len(followers_set), desc="Fetching follows", unit="follower") as pbar:
         for follower_did in followers_set:
             # 最終投稿が30日以上前の場合はスキップ
+            # ユーザーの最新の投稿を取得
             try:
-                last_post_time = client.app.bsky.actor.get_profile({'actor': follower_did}).last_post_time
-            except AttributeError:
-                print(f"Error: 'last_post_time' attribute not found for actor {follower_did}. Skipping...")
+                response = client.app.bsky.feed.get_author_feed({'actor': follower_did, 'limit': 1})
+                latest_post = response.feed[0] if response.feed else None
+                if latest_post:
+                    latest_post_time_str = latest_post.post.record.created_at
+                    latest_post_time = time.mktime(time.strptime(latest_post_time_str.split('.')[0], "%Y-%m-%dT%H:%M:%S"))
+                else:
+                    pbar.set_postfix_str(f"No posts for actor {follower_did}. Skipping...")
+                    pbar.update(1)
+                    continue
+            except Exception as e:
+                pbar.set_postfix_str(f"Error retrieving posts for actor {follower_did}: {e}. Skipping...")
+                pbar.update(1)
+                continue
+            if (time.time() - latest_post_time) > 30 * 24 * 60 * 60:
+                pbar.set_postfix_str(f"Last post over 30 days ago for actor {follower_did}. Skipping...")
+                pbar.update(1)
                 continue
 
-            if (time.time() - last_post_time) > 30 * 24 * 60 * 60:
-                continue
-            
             start_time = time.time()
             cursor = None
             while True:
