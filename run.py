@@ -110,6 +110,9 @@ def calculate_list_changes(client, followers, following, list_users):
             elapsed_time = time.time() - start_time
             pbar.set_postfix_str(f"Handle: {follower.handle}, ETA: {pbar.format_interval(elapsed_time * (len(followers) - pbar.n))}")
             pbar.update(1)
+    
+    # この時点で自分がフォローしている人は除外しておく
+    followers_following = followers_following - following_set
 
     followers_following_following_dict = {}
     with tqdm(total=len(followers_following), desc="Processing followers_following", unit="follower") as pbar:
