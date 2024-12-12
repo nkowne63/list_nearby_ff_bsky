@@ -115,26 +115,34 @@ def calculate_list_changes(client, followers, following, list_users):
     return to_add, to_remove
 
 def update_list(client, list_id, to_add, to_remove):    
+    # リストのアイテムを全件取得
+    items = []
+    cursor = None
+    while True:
+        response = retry_with_backoff(
+            lambda: client.app.bsky.graph.get_list({'list': list_id, 'cursor': cursor})
+        )
+        items.extend(response.items)
+        if not response.cursor:
+            break
+        cursor = response.cursor
+    print("list items fetched")
+
     # リストから削除
-    remove_count = 0
-    for did in to_remove:
-        items = retry_with_backoff(
-            lambda: client.app.bsky.graph.get_list({"list": list_id})
-        ).items
-        
-        for item in items:
-            if item.subject.did == did:
-                uri_parts = item.uri.split('/')
-                rkey = uri_parts[-1]
-                profile = retry_with_backoff(
-                    lambda: client.app.bsky.actor.get_profile({'actor': did})
-                )
-                retry_with_backoff(lambda: client.app.bsky.graph.listitem.delete(
-                    repo=client.me.did,
-                    rkey=rkey
-                ))
-                remove_count += 1
-                print(f"Removed from list {remove_count}/{len(to_remove)}: {profile.handle}")
+    for remove_count, did in enumerate(to_remove, start=1):
+        # 該当するユーザーのアイテムを探す
+        item = next((item for item in items if item.subject.did == did), None)
+        if item:
+            uri_parts = item.uri.split('/')
+            rkey = uri_parts[-1]
+            profile = retry_with_backoff(
+                lambda: client.app.bsky.actor.get_profile({'actor': did})
+            )
+            retry_with_backoff(lambda: client.app.bsky.graph.listitem.delete(
+                repo=client.me.did,
+                rkey=rkey
+            ))
+            print(f"Removed from list {remove_count}/{len(to_remove)}: {profile.handle}")
 
     # リストに追加
     for i, did in enumerate(to_add, 1):
