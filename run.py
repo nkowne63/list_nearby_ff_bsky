@@ -94,6 +94,7 @@ def calculate_list_changes(client, followers, following, list_users):
     followers_following = set()
     with tqdm(total=len(followers_set), desc="Fetching follows", unit="follower") as pbar:
         for follower_did in followers_set:
+            follower_handle = next((user.handle for user in followers if user.did == follower_did), "Unknown")
             # 最終投稿が30日以上前の場合はスキップ
             # ユーザーの最新の投稿を取得
             try:
@@ -103,15 +104,15 @@ def calculate_list_changes(client, followers, following, list_users):
                     latest_post_time_str = latest_post.post.record.created_at
                     latest_post_time = time.mktime(time.strptime(latest_post_time_str.split('.')[0], "%Y-%m-%dT%H:%M:%S"))
                 else:
-                    pbar.set_postfix_str(f"No posts for actor {follower_did}. Skipping...")
+                    pbar.set_postfix_str(f"No posts for actor {follower_handle}. Skipping...")
                     pbar.update(1)
                     continue
             except Exception as e:
-                pbar.set_postfix_str(f"Error retrieving posts for actor {follower_did}: {e}. Skipping...")
+                pbar.set_postfix_str(f"Error retrieving posts for actor {follower_handle}: {e}. Skipping...")
                 pbar.update(1)
                 continue
             if (time.time() - latest_post_time) > 30 * 24 * 60 * 60:
-                pbar.set_postfix_str(f"Last post over 30 days ago for actor {follower_did}. Skipping...")
+                pbar.set_postfix_str(f"Last post over 30 days ago for actor {follower_handle}. Skipping...")
                 pbar.update(1)
                 continue
 
@@ -129,7 +130,6 @@ def calculate_list_changes(client, followers, following, list_users):
                 cursor = response.cursor
             
             elapsed_time = time.time() - start_time
-            follower_handle = next((user.handle for user in followers if user.did == follower_did), "Unknown")
             pbar.set_postfix_str(f"Handle: {follower_handle}, ETA: {pbar.format_interval(elapsed_time * (len(followers_set) - pbar.n))}")
             pbar.update(1)
     
