@@ -108,12 +108,12 @@ def calculate_list_changes(client, followers, following, list_users):
                     break
                 cursor = response.cursor
             elapsed_time = time.time() - start_time
-            pbar.set_postfix_str(f"ETA: {pbar.format_interval(elapsed_time * (len(followers) - pbar.n))}")
+            pbar.set_postfix_str(f"Handle: {follower.handle}, ETA: {pbar.format_interval(elapsed_time * (len(followers) - pbar.n))}")
             pbar.update(1)
 
     followers_following_following_dict = {}
     with tqdm(total=len(followers_following), desc="Processing followers_following", unit="follower") as pbar:
-        for index, follower_did in enumerate(followers_following, start=1):
+        for follower_did in followers_following:
             start_time = time.time()
             cursor = None
             follower_following_set = set()
@@ -128,8 +128,11 @@ def calculate_list_changes(client, followers, following, list_users):
                 cursor = response.cursor
             followers_following_following_dict[follower_did] = follower_following_set
             
+            # フォロワーのハンドルを取得
+            follower_handle = next((user.handle for user in followers if user.did == follower_did), "Unknown")
+            
             elapsed_time = time.time() - start_time
-            pbar.set_postfix_str(f"ETA: {pbar.format_interval(elapsed_time * (len(followers_following) - pbar.n))}")
+            pbar.set_postfix_str(f"Handle: {follower_handle}, ETA: {pbar.format_interval(elapsed_time * (len(followers_following) - pbar.n))}")
             pbar.update(1)
     
     # 自分のfollowingと共通のfollowingを持つユーザーを抽出
