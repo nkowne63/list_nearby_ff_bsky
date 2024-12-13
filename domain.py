@@ -7,7 +7,7 @@ def get_neighbor_users(client: Client):
     following = set(get_following(client, self_did))
     followers_count = get_followers_count(client, self_did)
     # フォロワーF1を取得
-    with tqdm(total=followers_count, desc="Followers", unit="user", position=0) as pbar:
+    with tqdm(total=followers_count, desc="Followers", unit="user", leave=False) as pbar:
         for follower in get_followers(client, self_did):
             follower_handle = get_handle(client, follower.did)
             follower_following_count = get_following_count(client, follower.did)
@@ -15,7 +15,7 @@ def get_neighbor_users(client: Client):
                 pbar.update(1)
                 continue
             # フォロワーのフォローF2を取得
-            with tqdm(total=follower_following_count, desc="> Followings", unit="user", position=1, leave=False) as pbar2:
+            with tqdm(total=follower_following_count, desc="> Followings", unit="user", leave=False) as pbar2:
                 pbar2.set_postfix_str(follower_handle)
                 for follower_following in get_following(client, follower.did):
                     follower_following_handle = get_handle(client, follower_following)
@@ -23,10 +23,10 @@ def get_neighbor_users(client: Client):
                     if follower_following_following_count > 1000:
                         pbar2.update(1)
                         continue
-                    with tqdm(total=follower_following_following_count, desc=">> Followings", unit="user", position=2, leave=False) as pbar3:
+                    with tqdm(total=follower_following_following_count, desc=">> Followings", unit="user", leave=False) as pbar3:
                         pbar3.set_postfix_str(follower_following_handle)
                         for follower_following_following in get_following(client, follower_following):
-                            if follower_following_following in following:
+                            if follower_following_following in following and follower_following not in following:
                                 yield follower_following
                                 break
                             pbar3.update(1)
