@@ -18,18 +18,38 @@ def get_followers(client: Client, did: str) -> Generator[ProfileView, None, None
         if not cursor:
             break
 
-def get_following(client: Client, did: str) -> Generator[ProfileView, None, None]:
-    cursor: str | None = None
+# dict of { did: (followings, last_cursor) }
+following_cache: dict[str, tuple[set[str], str | None]] = {}
+
+def get_following(client: Client, did: str) -> Generator[str, None, None]:
+    if did in following_cache:
+        cached_followings, cursor = following_cache[did]
+        yield from cached_followings
+    else:
+        cursor: str | None = None
+        cached_followings = set()
     def fetch_follows():
-        nonlocal cursor
+        nonlocal cursor, cached_followings
         response = client.app.bsky.graph.get_follows({'actor': did, 'cursor': cursor})
         cursor = response.cursor
-        return response.follows
+        follows = [follower.did for follower in response.follows]
+        cached_followings.update(follows)
+        return follows
     while True:
         follows = retry_with_backoff(fetch_follows)
         yield from follows
         if not cursor:
             break
+    following_cache[did] = (cached_followings, cursor)
+
+def get_handle(client: Client, did: str) -> str:
+    return retry_with_backoff(lambda: client.app.bsky.actor.get_profile({'actor': did})).handle
+
+def get_following_count(client: Client, did: str) -> int:
+    return retry_with_backoff(lambda: client.app.bsky.actor.get_profile({'actor': did})).follows_count
+
+def get_followers_count(client: Client, did: str) -> int:
+    return retry_with_backoff(lambda: client.app.bsky.actor.get_profile({'actor': did})).followers_count
 
 def add_users_to_list(client: Client, list_id: str, users_to_add: list[str]) -> Generator[str, None, None]:
     for did in users_to_add:
@@ -81,8 +101,7 @@ def retry_with_backoff(func, max_retries=16, initial_delay=1):
             time.sleep(delay)
 
 def get_self_did(client: Client) -> str:
-    profile = client.me.did
-    return profile.did
+    return client.me.did
 
 def get_list_users(client: Client, list_name: str):
     # リストが存在するか確認
@@ -99,7 +118,7 @@ def get_list_users(client: Client, list_name: str):
         cursor = None
         while True:
             response = client.app.bsky.graph.get_list({'list': list_id, 'cursor': cursor})
-            yield from response.items
+            yield from [item.subject.did for item in response.items]
             if not response.cursor:
                 break
             cursor = response.cursor
